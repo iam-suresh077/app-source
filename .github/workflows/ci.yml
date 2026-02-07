@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+      - test
+      - main
+
+permissions:
+  id-token: write   # REQUIRED for OIDC
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 🔹 Detect environment
+      - name: Set env based on branch
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            dev)
+              echo "ENV=dev" >> $GITHUB_ENV
+              echo "ECR_REPO=453794566665.dkr.ecr.ap-south-1.amazonaws.com/dev-cluster" >> $GITHUB_ENV
+              echo "VALUES_FILE=values/dev/hello.yaml" >> $GITHUB_ENV
+              ;;
+            test)
+              echo "ENV=test" >> $GITHUB_ENV
+              echo "ECR_REPO=453794566665.dkr.ecr.ap-south-1.amazonaws.com/test-cluster" >> $GITHUB_ENV
+              echo "VALUES_FILE=values/test/hello.yaml" >> $GITHUB_ENV
+              ;;
+            main)
+              echo "ENV=prod" >> $GITHUB_ENV
+              echo "ECR_REPO=453794566665.dkr.ecr.ap-south-1.amazonaws.com/prod-cluster" >> $GITHUB_ENV
+              echo "VALUES_FILE=values/prod/hello.yaml" >> $GITHUB_ENV
+              ;;
+          esac
+
+      # 🔹 Authenticate to AWS (OIDC)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 🔹 Login to ECR
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password \
+            | docker login \
+              --username AWS \
+              --password-stdin 453794566665.dkr.ecr.ap-south-1.amazonaws.com
+
+      # 🔹 Build & push image
+      - name: Build & Push Docker Image
+        run: |
+          TAG=${GITHUB_SHA::7}
+          docker build -t $ECR_REPO:$TAG .
+          docker push $ECR_REPO:$TAG
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+
+      # 🔹 Update GitOps repo
+      - name: Update GitOps repo
+        run: |
+          git clone https://x-access-token:${{ secrets.GITOPS_TOKEN }}@github.com/your-org/gitops-repo.git
+          cd gitops-repo
+
+          sed -i "s/tag:.*/tag: $IMAGE_TAG/" $VALUES_FILE
+
+          git config user.email "ci-bot@company.com"
+          git config user.name "ci-bot"
+
+          git commit -am "Deploy $ENV image $IMAGE_TAG" || echo "No changes to commit"
+          git push
